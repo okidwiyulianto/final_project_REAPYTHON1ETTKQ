@@ -629,27 +629,57 @@ st.set_page_config(layout="wide", page_title="Sistem Rekomendasi Media Interakti
 # --- Sistem Login Sederhana di Sidebar ---
 st.sidebar.header("Login Pengguna")
 st.sidebar.caption("Masukkan ID unik untuk menyimpan preferensi dan daftar bacaan Anda dalam sesi ini.")
-if st.session_state.current_user_id:
+
+# Bagian ini (ketika pengguna SUDAH login) tidak perlu diubah.
+if st.session_state.get("current_user_id"):
     st.sidebar.success(f"Masuk sebagai: {st.session_state.current_user_id}")
-    if st.sidebar.button("Keluar", key="logout_button_main_sidebar"): 
+    if st.sidebar.button("Keluar", key="logout_button_main_sidebar"):
+        # Reset semua state terkait pengguna
         st.session_state.current_user_id = None
-        st.session_state.all_search_results = [] 
-        # Anda mungkin ingin membersihkan cache LLM spesifik pengguna juga di sini jika diinginkan
-        # atau biarkan untuk potensi login kembali dengan ID yang sama di sesi yang sama.
+        st.session_state.all_search_results = []
+        # Anda bisa menambahkan reset state lain di sini jika perlu
         st.rerun()
 else:
-    new_user_id_input = st.sidebar.text_input("ID Pengguna Pilihan Anda:", key="user_id_input_main_sidebar", help="Gunakan ID yang sama setiap kali Anda kembali untuk mengakses daftar Anda (dalam sesi browser yang sama).")
-    if st.sidebar.button("Masuk / Gunakan ID Ini", key="login_button_main_sidebar"): 
-        if new_user_id_input.strip():
-            st.session_state.current_user_id = new_user_id_input.strip()
+    # --- PERUBAHAN DIMULAI DI SINI ---
+
+    # 1. Buat fungsi callback untuk memproses login
+    def proses_login():
+        # Ambil nilai input dari st.session_state menggunakan kuncinya
+        user_id = st.session_state.user_id_input_main_sidebar
+        
+        if user_id and user_id.strip():
+            # Jika input valid, set ID pengguna dan siapkan state
+            st.session_state.current_user_id = user_id.strip()
+            
+            # Inisialisasi cache & daftar jika pengguna baru
             if st.session_state.current_user_id not in st.session_state.llm_cache:
                 st.session_state.llm_cache[st.session_state.current_user_id] = {}
             if st.session_state.current_user_id not in st.session_state.user_specific_lists:
                 st.session_state.user_specific_lists[st.session_state.current_user_id] = {}
-            st.sidebar.success(f"Berhasil masuk sebagai: {st.session_state.current_user_id}")
+            
+            # Tidak perlu menampilkan pesan sukses di sini karena st.rerun()
+            # akan menjalankan ulang skrip dan menampilkan pesan di blok 'if' di atas.
             st.rerun()
         else:
-            st.sidebar.warning("ID Pengguna tidak boleh kosong.")
+            # Jika input kosong, kita bisa menampilkan peringatan sementara,
+            # meskipun idealnya validasi terjadi saat submit.
+            # Untuk on_change, lebih baik tidak menampilkan apa-apa atau biarkan kosong.
+            # Pengguna akan sadar inputnya tidak diterima karena tidak terjadi apa-apa.
+            pass
+
+    # 2. Gunakan on_change pada text_input dan hapus tombol "Masuk"
+    st.sidebar.text_input(
+        "ID Pengguna Pilihan Anda:",
+        key="user_id_input_main_sidebar",
+        help="Gunakan ID yang sama setiap kali untuk mengakses daftar Anda.",
+        on_change=proses_login  # <-- Pemicu login otomatis ada di sini
+    )
+    
+    # Pesan peringatan bisa ditampilkan di bawah input jika diperlukan,
+    # tapi seringkali tidak diperlukan dengan pola on_change.
+    if st.session_state.get('login_warning'):
+        st.sidebar.warning(st.session_state.login_warning)
+        del st.session_state.login_warning # Hapus setelah ditampilkan
 # --- Struktur Tab Utama ---
 if not st.session_state.current_user_id:
     st.info("👋 Selamat datang! Harap masukkan ID Pengguna Anda di sidebar kiri untuk memulai.")
@@ -660,63 +690,112 @@ else:
     # Tampilkan Tab hanya jika pengguna sudah "login"
     tab_cari, tab_daftar = st.tabs(["Cari & Temukan 🔎", "Daftar Bacaan Saya 📚"])
 
+    # --- Kode sebelum 'with tab_cari:' tetap sama ---
+
     with tab_cari:
         st.title("📖 Cari & Temukan Buku, Manga, dan Lainnya")
-        st.write("Konten untuk pencarian akan ada di sini.")
-        
-        # --- Perbaikan Bug 1: Logika Input Pencarian dengan Key Widget Terpisah ---
+        st.write("Ketik pencarian Anda di bawah dan tekan Enter untuk memulai.")
+
+        # Kunci widget untuk konsistensi
         search_query_input_widget_key = "search_query_input_for_tab1"
+
+        # --- PERUBAHAN 1: Membuat Fungsi Callback ---
+        # Fungsi ini akan dijalankan setiap kali input teks berubah (saat menekan Enter).
+        # Tujuannya adalah untuk MENYIAPKAN state untuk pencarian baru.
+        def siapkan_pencarian():
+            # Ambil query saat ini dari widget input
+            query_saat_ini = st.session_state[search_query_input_widget_key]
+            
+            # Jika query kosong, jangan lakukan apa-apa
+            if not query_saat_ini:
+                return
+                
+            # Simpan query dan sumber pencarian terakhir
+            st.session_state.last_searched_query = query_saat_ini
+            st.session_state.last_selected_source_option = st.session_state.source_filter_radio
+            
+            # Reset semua hasil dan state pencarian sebelumnya
+            st.session_state.all_search_results = []
+            st.session_state.current_search_page = 1
+            st.session_state.api_next_page_params = {}
+            st.session_state.api_has_more_results = {}
+            st.session_state.sources_exhausted_for_load_more = set()
+            
+            # Tandai bahwa pencarian baru telah dipicu
+            st.session_state.search_triggered = True
+
+        # --- PERUBAHAN 2: Menambahkan argumen 'on_change' pada st.text_input ---
+        # Tombol "Cari" sudah tidak diperlukan lagi.
         st.text_input(
             "Cari judul, penulis, atau tema:",
             value=st.session_state.get("last_searched_query", ""),
-            key=search_query_input_widget_key # Key unik untuk widget input
+            key=search_query_input_widget_key,
+            on_change=siapkan_pencarian  # <-- Pemicu otomatis ada di sini
         )
 
         st.session_state.source_filter_radio = st.radio(
             "Pilih sumber pencarian:",
             ('Semua Sumber', 'Google Books', 'Open Library', 'MyAnimeList'),
             index=['Semua Sumber', 'Google Books', 'Open Library', 'MyAnimeList'].index(st.session_state.get("last_selected_source_option", "Semua Sumber")),
-            horizontal=True, key="source_filter_radio_tab1_key"
+            horizontal=True, 
+            key="source_filter_radio_tab1_key",
+            on_change=siapkan_pencarian # <-- Tambahkan juga di sini agar perubahan sumber memicu pencarian ulang
         )
 
-        if st.button("Cari Item Online", key="search_online_tab1_button_key"):
-            query_saat_ini = st.session_state[search_query_input_widget_key]
-            st.session_state.last_searched_query = query_saat_ini  # Update segera
-            st.session_state.all_search_results = []
-            st.session_state.current_search_page = 1
-            st.session_state.search_triggered = True
-            st.session_state.last_selected_source_option = st.session_state.source_filter_radio 
-            st.session_state.api_next_page_params = {}
-            st.session_state.api_has_more_results = {}
-            st.session_state.sources_exhausted_for_load_more = set()
-            
+        # --- PERUBAHAN 3: Menjalankan pencarian berdasarkan 'search_triggered' ---
+        # Logika ini sekarang terpisah dari input widget.
+        if st.session_state.get("search_triggered", False):
+            # Ambil query dan sumber dari session_state yang sudah disimpan oleh callback
             selected_source_tab1 = st.session_state.last_selected_source_option
-            query_tab1_logic = st.session_state.last_searched_query  # Pakai nilai yang sudah diupdate
-            processed_ids_in_current_search_tab1 = set()
-            api_calls_tab1 = []
-
-            if (selected_source_tab1 == "Google Books" or selected_source_tab1 == "Semua Sumber"):
-                if st.session_state.google_books_api_key and st.session_state.google_books_api_key != "YOUR_GOOGLE_BOOKS_API_KEY":
-                    api_calls_tab1.append({'func': search_google_books, 'args': [query_tab1_logic, st.session_state.google_books_api_key], 'kwargs': {'startIndex': 0}, 'name': 'google_books', 'label': 'Google Books'})
-                elif selected_source_tab1 == "Google Books": st.warning("API Key Google Books tidak valid atau belum diset.")
-            if selected_source_tab1 == "Open Library" or selected_source_tab1 == "Semua Sumber":
-                api_calls_tab1.append({'func': search_open_library_by_query, 'args': [query_tab1_logic], 'kwargs': {'page': 1}, 'name': 'open_library', 'label': 'Open Library'})
-            if selected_source_tab1 == "MyAnimeList" or selected_source_tab1 == "Semua Sumber":
-                api_calls_tab1.append({'func': search_myanimelist, 'args': [query_tab1_logic], 'kwargs': {'page': 1}, 'name': 'myanimelist', 'label': 'MyAnimeList'})
+            query_tab1_logic = st.session_state.last_searched_query
             
-            for call_info_tab1 in api_calls_tab1:
-                with st.spinner(f"Mencari di {call_info_tab1['label']} untuk '{query_tab1_logic}'..."):
-                    res_list_tab1, has_more_api_tab1, next_params_api_tab1 = call_info_tab1['func'](*call_info_tab1['args'], **call_info_tab1['kwargs'])
-                    count_added_tab1 = 0
-                    for item_tab1 in res_list_tab1:
-                        item_api_id_tab1 = item_tab1.get('id_buku_api')
-                        if item_api_id_tab1 and item_api_id_tab1 not in processed_ids_in_current_search_tab1:
-                            st.session_state.all_search_results.append(item_tab1)
-                            processed_ids_in_current_search_tab1.add(item_api_id_tab1); count_added_tab1 +=1
-                    st.session_state.api_has_more_results[call_info_tab1['name']] = has_more_api_tab1
-                    st.session_state.api_next_page_params[call_info_tab1['name']] = next_params_api_tab1
-                    if count_added_tab1 > 0: st.info(f"{call_info_tab1['label']}: {count_added_tab1} hasil awal.")
-            if not st.session_state.all_search_results: st.info("Tidak ada hasil pencarian.")
+            # Jika query kosong, hentikan dan reset trigger
+            if not query_tab1_logic:
+                st.session_state.search_triggered = False
+            else:
+                processed_ids_in_current_search_tab1 = set()
+                api_calls_tab1 = []
+        
+                if (selected_source_tab1 == "Google Books" or selected_source_tab1 == "Semua Sumber"):
+                    if st.session_state.google_books_api_key and st.session_state.google_books_api_key != "YOUR_GOOGLE_BOOKS_API_KEY":
+                        api_calls_tab1.append({'func': search_google_books, 'args': [query_tab1_logic, st.session_state.google_books_api_key], 'kwargs': {'startIndex': 0}, 'name': 'google_books', 'label': 'Google Books'})
+                    elif selected_source_tab1 == "Google Books": 
+                        st.warning("API Key Google Books tidak valid atau belum diset.")
+                
+                if selected_source_tab1 == "Open Library" or selected_source_tab1 == "Semua Sumber":
+                    api_calls_tab1.append({'func': search_open_library_by_query, 'args': [query_tab1_logic], 'kwargs': {'page': 1}, 'name': 'open_library', 'label': 'Open Library'})
+                
+                if selected_source_tab1 == "MyAnimeList" or selected_source_tab1 == "Semua Sumber":
+                    api_calls_tab1.append({'func': search_myanimelist, 'args': [query_tab1_logic], 'kwargs': {'page': 1}, 'name': 'myanimelist', 'label': 'MyAnimeList'})
+                
+                # Eksekusi panggilan API
+                for call_info_tab1 in api_calls_tab1:
+                    with st.spinner(f"Mencari di {call_info_tab1['label']} untuk '{query_tab1_logic}'..."):
+                        res_list_tab1, has_more_api_tab1, next_params_api_tab1 = call_info_tab1['func'](*call_info_tab1['args'], **call_info_tab1['kwargs'])
+                        count_added_tab1 = 0
+                        for item_tab1 in res_list_tab1:
+                            item_api_id_tab1 = item_tab1.get('id_buku_api')
+                            if item_api_id_tab1 and item_api_id_tab1 not in processed_ids_in_current_search_tab1:
+                                st.session_state.all_search_results.append(item_tab1)
+                                processed_ids_in_current_search_tab1.add(item_api_id_tab1)
+                                count_added_tab1 += 1
+                        
+                        st.session_state.api_has_more_results[call_info_tab1['name']] = has_more_api_tab1
+                        st.session_state.api_next_page_params[call_info_tab1['name']] = next_params_api_tab1
+                        if count_added_tab1 > 0: 
+                            st.info(f"{call_info_tab1['label']}: {count_added_tab1} hasil awal ditemukan.")
+
+                # Reset trigger agar tidak berjalan lagi pada rerun berikutnya
+                st.session_state.search_triggered = False
+
+                if not st.session_state.all_search_results: 
+                    st.info("Tidak ada hasil pencarian yang ditemukan.")
+
+        # --- Kode untuk menampilkan hasil pencarian (jika ada) tetap di sini ---
+        # Misalnya:
+        # if st.session_state.get("all_search_results"):
+        #     st.write("Menampilkan hasil:")
+        #     # ... logika display hasil ...
 
         if st.session_state.get('all_search_results'):
             total_items_disp_t1 = len(st.session_state.all_search_results)
